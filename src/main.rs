@@ -6,7 +6,9 @@ use rmcp::transport::stdio;
 use rmcp::{RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Map, Value};
 
-use scientific_process::{Conclusion, Experiment, Hypothesis, Observation, Session, Status, Verdict};
+use scientific_process::{
+    Conclusion, Experiment, Hypothesis, Observation, Session, Status, Verdict,
+};
 
 type McpError = rmcp::ErrorData;
 
