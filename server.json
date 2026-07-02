@@ -1,0 +1,15 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "dev.praxec/scientific-process",
+  "description": "Append-only scientific-process MCP server — hypotheses, experiments, observations, conclusions.",
+  "version": "0.1.0",
+  "repository": { "url": "https://github.com/praxec/scientific-process", "source": "github" },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/praxec/scientific-process",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" }
+    }
+  ]
+}
