@@ -39,6 +39,7 @@ jobs:
           bin: scientific-process
           target: ${{ matrix.target }}
           archive: scientific-process-${{ matrix.target }}
+          checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
   image:
