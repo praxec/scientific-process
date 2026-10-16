@@ -31,6 +31,25 @@ Duplicate ids are rejected with `DUPLICATE_ID`; references to unknown ids with
 `HYPOTHESIS_NOT_FOUND` or `EXPERIMENT_NOT_FOUND`. A rejected event writes
 nothing: the log is validated before it is appended.
 
+## Advisory assist tools (opt-in, never append)
+
+When `SCIENTIFIC_PROCESS_ASSIST` includes `jev` and a Jev key is configured
+(`TYPESAFE_JEV_API_KEY` or `OPENROUTER_API_KEY`), four advisory tools ask Jev
+for a second opinion. They only read the session and always return proposals —
+they never append events and never change the standing:
+
+| Tool | Question |
+|---|---|
+| `assist.experiment_check` | Is the design falsifiable, and the prediction specific and measurable? |
+| `assist.observation_support` | P(supports / refutes / irrelevant) for an observation, flagging disagreement with `supports` |
+| `assist.verdict_check` | Is the verdict backed by the observations? Warnings plus a confidence |
+| `assist.hypothesis_check` | Is the statement testable? Near-duplicates of existing hypotheses |
+
+Each response includes the exact question text sent and per-option
+probabilities. With no key every assist tool returns `ASSIST_UNAVAILABLE` and
+the core tools continue to work unchanged. Tune the timeout with
+`SCIENTIFIC_PROCESS_JEV_TIMEOUT_SECS` (seconds, 1–300).
+
 ## Session lifecycle
 
 1. Call `session.open` with a `session_id` before any `append`. A new id starts

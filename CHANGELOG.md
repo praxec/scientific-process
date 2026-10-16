@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in, paid Jev assist layer behind the default-on `jev` cargo feature,
+  following crossmatrix's provider-neutral judge design. Four advisory MCP tools
+  (`assist.experiment_check`, `assist.observation_support`,
+  `assist.verdict_check`, `assist.hypothesis_check`) propose probabilities and
+  concrete fixes without ever appending an event; the six core tools and the
+  pure domain fold are unchanged. Config comes from `TYPESAFE_JEV_API_KEY` or
+  `OPENROUTER_API_KEY`, gated by `SCIENTIFIC_PROCESS_ASSIST` and optionally
+  tuned with `SCIENTIFIC_PROCESS_JEV_TIMEOUT_SECS`, `SCIENTIFIC_PROCESS_JEV_BASE_URL`
+  and `SCIENTIFIC_PROCESS_JEV_MODEL`. With no key every assist tool reports
+  `ASSIST_UNAVAILABLE`.
 - Release engineering brought up to the praxec release standard:
   - `.github/workflows/release.yml` builds six targets (Linux, macOS and
     Windows on x86_64 and ARM64), smoke-tests every packaged binary with

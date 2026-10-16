@@ -8,10 +8,14 @@ use rmcp::transport::stdio;
 use rmcp::{RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Map, Value};
 
+use scientific_process::assist::tools::Judge;
 use scientific_process::store::{self, FilesystemStore};
 use scientific_process::{
     Conclusion, Event, Experiment, Hypothesis, Observation, Session, Status, Verdict,
 };
+
+#[cfg(feature = "jev")]
+use scientific_process::assist::jev::{HttpJudge, JevConfig};
 
 type McpError = rmcp::ErrorData;
 
@@ -21,6 +25,8 @@ type McpError = rmcp::ErrorData;
 struct S {
     store: Arc<FilesystemStore>,
     active: Arc<Mutex<Option<ActiveSession>>>,
+    /// Resolved Jev judge, or `None` when assist is disabled/unconfigured.
+    judge: Option<Arc<dyn Judge>>,
 }
 
 /// Session used when `session.open` names none (pre-persistence callers).
@@ -37,10 +43,18 @@ impl S {
     }
 
     fn with_state_dir(state_dir: impl Into<PathBuf>) -> Self {
+        Self::with_state_dir_and_judge(state_dir, resolve_judge_from_env())
+    }
+
+    fn with_state_dir_and_judge(
+        state_dir: impl Into<PathBuf>,
+        judge: Option<Arc<dyn Judge>>,
+    ) -> Self {
         let store = FilesystemStore::new(state_dir).expect("create scientific-process state dir");
         Self {
             store: Arc::new(store),
             active: Arc::new(Mutex::new(None)),
+            judge,
         }
     }
 
@@ -143,6 +157,70 @@ impl S {
                         }
                     },
                     "required": ["cases"]
+                }),
+            ),
+            Self::make_tool(
+                "assist.experiment_check",
+                "ADVISORY (never appends events). Ask Jev whether an experiment's design is \
+                falsifiable and its prediction specific and measurable. Returns a probability \
+                for each, concrete fixes for the weak half, the exact question text sent, the \
+                model and token usage. With no configured key it returns ASSIST_UNAVAILABLE.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "experiment_id": {"type": "string"}
+                    },
+                    "required": ["experiment_id"]
+                }),
+            ),
+            Self::make_tool(
+                "assist.observation_support",
+                "ADVISORY (never appends events). Ask Jev for P(supports / refutes / irrelevant) \
+                that an observation supports its hypothesis, from the result and evidence. Flags \
+                disagreement with the caller's `supports` flag and returns per-option \
+                probabilities. With no configured key it returns ASSIST_UNAVAILABLE.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "observation_id": {"type": "string"}
+                    },
+                    "required": ["observation_id"]
+                }),
+            ),
+            Self::make_tool(
+                "assist.verdict_check",
+                "ADVISORY (never appends events). Ask Jev whether a stated verdict is backed by \
+                the observations, and return deterministic warnings (for example Supported with \
+                zero or refuting observations) plus a confidence. With no configured key it \
+                returns ASSIST_UNAVAILABLE.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "hypothesis_id": {"type": "string"},
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["Supported", "Refuted", "Inconclusive"]
+                        }
+                    },
+                    "required": ["hypothesis_id", "verdict"]
+                }),
+            ),
+            Self::make_tool(
+                "assist.hypothesis_check",
+                "ADVISORY (never appends events). Ask Jev whether a candidate hypothesis \
+                statement is testable and falsifiable, and report near-duplicates of the \
+                hypotheses already in the session. With no configured key it returns \
+                ASSIST_UNAVAILABLE.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "statement": {"type": "string"}
+                    },
+                    "required": ["statement"]
                 }),
             ),
         ]
@@ -348,6 +426,46 @@ impl S {
             other => Err(format!("unknown tool: {other}")),
         }
     }
+
+    /// Async dispatch: advisory assist tools go through the provider-neutral
+    /// dispatcher with a cloned session (never mutating the live log), and the
+    /// six core tools fall through to the synchronous path.
+    async fn call_tool_async(&self, name: &str, args: Value) -> Result<String, String> {
+        if scientific_process::assist::tools::is_assist_tool(name) {
+            let session = {
+                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let active = guard
+                    .as_ref()
+                    .ok_or("no session open; call session.open first")?;
+                active.session.clone()
+            };
+            let value = scientific_process::assist::tools::dispatch(
+                name,
+                &args,
+                &session,
+                self.judge.as_deref(),
+            )
+            .await
+            .expect("assist tool name was checked");
+            return serde_json::to_string(&value).map_err(|e| format!("json: {e}"));
+        }
+        self.call_tool_impl(name, args)
+    }
+}
+
+/// Resolves the Jev judge from the process environment. Assist is opt-in: a
+/// missing `SCIENTIFIC_PROCESS_ASSIST` entry or a missing key simply leaves
+/// the judge unset and every assist tool reports ASSIST_UNAVAILABLE.
+#[cfg(feature = "jev")]
+fn resolve_judge_from_env() -> Option<Arc<dyn Judge>> {
+    JevConfig::from_env()
+        .ok()
+        .map(|config| Arc::new(HttpJudge::new(config)) as Arc<dyn Judge>)
+}
+
+#[cfg(not(feature = "jev"))]
+fn resolve_judge_from_env() -> Option<Arc<dyn Judge>> {
+    None
 }
 
 // ─── ServerHandler implementation (rmcp 1.8 idioms — mirror log-mcp) ───────────
@@ -369,7 +487,13 @@ impl ServerHandler for S {
               state.get       – return the computed standing projection\n\
               experiment.next – return the highest-leverage open hypothesis (fewest observations), or null\n\
               report.export   – return the structured report\n\
-              adjudicate      – stateless batch falsification adjudicator (does not touch the live session)"
+              adjudicate      – stateless batch falsification adjudicator (does not touch the live session)\n\
+            Advisory assist tools (opt-in Jev layer; never append events):\n\
+              assist.experiment_check  – falsifiability + measurability of an experiment, with fixes\n\
+              assist.observation_support – P(supports/refutes/irrelevant) for an observation\n\
+              assist.verdict_check     – warnings when a verdict is not backed by observations\n\
+              assist.hypothesis_check  – testability + near-duplicates of a candidate hypothesis\n\
+            Every assist tool returns ASSIST_UNAVAILABLE when no key is configured."
                 .to_string(),
         );
         result
@@ -393,7 +517,7 @@ impl ServerHandler for S {
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| Value::Object(Default::default()));
-        match self.call_tool_impl(req.name.as_ref(), args) {
+        match self.call_tool_async(req.name.as_ref(), args).await {
             Ok(text) => {
                 // Populate BOTH text content (human/audit) AND structured_content
                 // (machine). Praxec's mcp executor maps `$.output` from
@@ -691,5 +815,136 @@ mod tests {
             parse_command(&args),
             Command::Skills(vec!["install".into(), "--target".into(), "claude".into()])
         );
+    }
+
+    #[cfg(feature = "jev")]
+    mod assist_dispatch_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use scientific_process::assist::Usage;
+        use scientific_process::assist::jev::{JevAnswer, JevQuestion, JevReply};
+        use std::collections::BTreeMap;
+
+        struct RefutesJudge;
+
+        #[async_trait]
+        impl Judge for RefutesJudge {
+            async fn ask(
+                &self,
+                _state: Value,
+                questions: BTreeMap<String, JevQuestion>,
+            ) -> Result<JevReply, scientific_process::assist::AssistUnavailable> {
+                let answers = questions
+                    .keys()
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            JevAnswer::Choice {
+                                choice: "refutes".to_string(),
+                                probabilities: BTreeMap::from([
+                                    ("refutes".to_string(), 0.8),
+                                    ("supports".to_string(), 0.1),
+                                    ("irrelevant".to_string(), 0.1),
+                                ]),
+                                confidence: 0.8,
+                            },
+                        )
+                    })
+                    .collect();
+                Ok(JevReply {
+                    model: "fake/jev".to_string(),
+                    answers,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        fn open_with_observation(s: &S) {
+            call(s, "session.open", serde_json::json!({ "session_id": "s1" })).unwrap();
+            call(
+                s,
+                "append",
+                serde_json::json!({
+                    "variant": "add_hypothesis", "id": "h1", "statement": "water boils"
+                }),
+            )
+            .unwrap();
+            call(
+                s,
+                "append",
+                serde_json::json!({
+                    "variant": "add_experiment", "id": "e1", "hypothesis_id": "h1",
+                    "design": "boil", "prediction": "100C"
+                }),
+            )
+            .unwrap();
+            call(
+                s,
+                "append",
+                serde_json::json!({
+                    "variant": "add_observation", "id": "o1", "experiment_id": "e1",
+                    "result": "80C", "supports": true, "evidence": "thermometer"
+                }),
+            )
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn assist_call_leaves_state_get_unchanged() {
+            let dir = tempfile::tempdir().unwrap();
+            let s = S::with_state_dir_and_judge(dir.path(), Some(Arc::new(RefutesJudge)));
+            open_with_observation(&s);
+            let before = s
+                .call_tool_async("state.get", Value::Object(Default::default()))
+                .await
+                .unwrap();
+            let _ = s
+                .call_tool_async(
+                    "assist.observation_support",
+                    serde_json::json!({ "observation_id": "o1" }),
+                )
+                .await
+                .unwrap();
+            let after = s
+                .call_tool_async("state.get", Value::Object(Default::default()))
+                .await
+                .unwrap();
+
+            assert_eq!(before, after);
+        }
+
+        #[tokio::test]
+        async fn assist_experiment_check_without_judge_reports_assist_unavailable() {
+            let dir = tempfile::tempdir().unwrap();
+            let s = S::with_state_dir_and_judge(dir.path(), None);
+            open_with_observation(&s);
+            let text = s
+                .call_tool_async(
+                    "assist.experiment_check",
+                    serde_json::json!({ "experiment_id": "e1" }),
+                )
+                .await
+                .unwrap();
+
+            assert!(text.contains("ASSIST_UNAVAILABLE"));
+        }
+
+        #[tokio::test]
+        async fn session_open_still_works_after_an_assist_unavailable_call() {
+            let dir = tempfile::tempdir().unwrap();
+            let s = S::with_state_dir_and_judge(dir.path(), None);
+            open_with_observation(&s);
+            let _ = s
+                .call_tool_async(
+                    "assist.experiment_check",
+                    serde_json::json!({ "experiment_id": "e1" }),
+                )
+                .await;
+            let reopened = s
+                .call_tool_async("session.open", serde_json::json!({ "session_id": "s1" }))
+                .await;
+
+            assert!(reopened.is_ok());
+        }
     }
 }
