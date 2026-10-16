@@ -7,8 +7,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/praxec/scientific-process",
-      "version": "0.1.0",
+      "identifier": "ghcr.io/praxec/scientific-process:0.1.0",
       "transport": { "type": "stdio" }
     }
   ]
