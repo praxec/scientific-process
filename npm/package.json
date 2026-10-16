@@ -1,6 +1,6 @@
 {
   "name": "@matthew-cochran/scientific-process",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "npx launcher for the scientific-process MCP server: downloads the verified release binary for your platform and runs it over stdio.",
   "keywords": [
     "mcp",
@@ -28,12 +28,15 @@
     "bin/scientific-process.js",
     "lib/install.js",
     "lib/postinstall.js",
+    "lib/sync-skills.js",
+    "skills/",
     "README.md",
     "LICENSE",
     "NOTICE"
   ],
   "scripts": {
     "postinstall": "node lib/postinstall.js",
+    "prepack": "node lib/sync-skills.js",
     "test": "node --test test/*.test.mjs"
   },
   "engines": {

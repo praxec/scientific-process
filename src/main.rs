@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn version_line_names_the_binary_and_package_version() {
-        assert_eq!(version_line(), "scientific-process 0.1.0");
+        assert_eq!(version_line(), format!("scientific-process {}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

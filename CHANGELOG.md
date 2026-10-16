@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
 ### Added
 
 - Opt-in, paid Jev assist layer behind the default-on `jev` cargo feature,
@@ -23,8 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `.github/workflows/release.yml` builds six targets (Linux, macOS and
     Windows on x86_64 and ARM64), smoke-tests every packaged binary with
     `scripts/mcp-smoke.mjs`, and aggregates `checksums.sha256` and
-    `release-manifest.json` before publishing the draft release. The npm
-    launcher steps are left as a clearly marked placeholder.
+    `release-manifest.json` before publishing the draft release. The finalize
+    job also packs the npm launcher with its bundled agent skills and attaches
+    the tarball and `npm-package.sha256`; an `npm` job publishes that exact
+    tarball over npm trusted publishing when `NPM_TRUSTED_PUBLISHING` is set.
   - `.github/workflows/image.yml` builds `ghcr.io/praxec/scientific-process`
     from the checksum-verified Linux release binaries with
     `Dockerfile.release`, smoke-tests the image, and publishes `server.json`
@@ -35,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `scripts/install.ps1` and `scripts/release.test.mjs`.
   - `deny.toml` and a `cargo-deny` CI job; clippy is now required to pass with
     `-D warnings`.
+  - `scripts/npm-publish.sh` (trusted publishing, skips an already-published
+    version, pre-releases to `next`) and `scripts/npm-release.sh` (manual first
+    publish with OTP), plus `npm/lib/sync-skills.js` to bundle `skills/` into
+    the package.
   - `docs/releasing.md`, the maintainer release runbook.
 - CLI, agent skills and npm launcher, matching the praxec standard:
   - `scientific-process --version`, `--help` and
@@ -50,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `server.json` names the OCI identifier with its version tag
-  (`ghcr.io/praxec/scientific-process:0.1.0`); the OCI package carries no
+  (`ghcr.io/praxec/scientific-process:0.2.0`); the OCI package carries no
   `version` field.
 
 ## [0.1.0] - 2026-08-04
