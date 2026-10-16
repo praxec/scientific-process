@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rmcp::model::*;
@@ -6,8 +7,9 @@ use rmcp::transport::stdio;
 use rmcp::{RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Map, Value};
 
+use scientific_process::store::{self, FilesystemStore};
 use scientific_process::{
-    Conclusion, Experiment, Hypothesis, Observation, Session, Status, Verdict,
+    Conclusion, Event, Experiment, Hypothesis, Observation, Session, Status, Verdict,
 };
 
 type McpError = rmcp::ErrorData;
@@ -16,13 +18,28 @@ type McpError = rmcp::ErrorData;
 
 #[derive(Clone)]
 struct S {
-    session: Arc<Mutex<Session>>,
+    store: Arc<FilesystemStore>,
+    active: Arc<Mutex<Option<ActiveSession>>>,
+}
+
+/// Session used when `session.open` names none (pre-persistence callers).
+const DEFAULT_SESSION_ID: &str = "default";
+
+struct ActiveSession {
+    session_id: String,
+    session: Session,
 }
 
 impl S {
     fn new() -> Self {
+        Self::with_state_dir(store::resolve_state_dir())
+    }
+
+    fn with_state_dir(state_dir: impl Into<PathBuf>) -> Self {
+        let store = FilesystemStore::new(state_dir).expect("create scientific-process state dir");
         Self {
-            session: Arc::new(Mutex::new(Session::new())),
+            store: Arc::new(store),
+            active: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -36,8 +53,13 @@ impl S {
         vec![
             Self::make_tool(
                 "session.open",
-                "Reset the session to a fresh state. No arguments required.",
-                serde_json::json!({ "type": "object", "properties": {} }),
+                "Open a session. With an existing session_id the append-only JSONL log is \
+                replayed and the session resumes; with a new id it starts fresh. \
+                session_id defaults to \"default\".",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "session_id": {"type": "string"} }
+                }),
             ),
             Self::make_tool(
                 "append",
@@ -128,8 +150,18 @@ impl S {
     fn call_tool_impl(&self, name: &str, args: Value) -> Result<String, String> {
         match name {
             "session.open" => {
-                let mut guard = self.session.lock().map_err(|e| format!("lock: {e}"))?;
-                *guard = Session::new();
+                let session_id = args["session_id"]
+                    .as_str()
+                    .unwrap_or(DEFAULT_SESSION_ID)
+                    .to_string();
+                store::validate_session_id(&session_id)?;
+                let events = self.store.replay(&session_id)?;
+                let session = Session::from_events(events);
+                let mut guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                *guard = Some(ActiveSession {
+                    session_id,
+                    session,
+                });
                 Ok(r#"{"status":"ok","message":"session opened"}"#.to_string())
             }
             "append" => {
@@ -146,13 +178,16 @@ impl S {
                 let verdict = args["verdict"].as_str().map(str::to_string);
                 let rationale = args["rationale"].as_str().map(str::to_string);
 
-                let mut guard = self.session.lock().map_err(|e| format!("lock: {e}"))?;
+                let mut guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let active = guard
+                    .as_mut()
+                    .ok_or("no session open; call session.open first")?;
 
-                match variant.as_str() {
+                let event = match variant.as_str() {
                     "add_hypothesis" => {
                         let id = id.ok_or("missing 'id'")?;
                         let statement = statement.ok_or("missing 'statement'")?;
-                        guard.add_hypothesis(Hypothesis {
+                        Event::AddHypothesis(Hypothesis {
                             id,
                             statement,
                             status: Status::Open,
@@ -163,7 +198,7 @@ impl S {
                         let hypothesis_id = hypothesis_id.ok_or("missing 'hypothesis_id'")?;
                         let design = design.ok_or("missing 'design'")?;
                         let prediction = prediction.ok_or("missing 'prediction'")?;
-                        guard.add_experiment(Experiment {
+                        Event::AddExperiment(Experiment {
                             id,
                             hypothesis_id,
                             design,
@@ -176,7 +211,7 @@ impl S {
                         let result = result_field.ok_or("missing 'result'")?;
                         let supports = supports.ok_or("missing 'supports'")?;
                         let evidence = evidence.ok_or("missing 'evidence'")?;
-                        guard.add_observation(Observation {
+                        Event::AddObservation(Observation {
                             id,
                             experiment_id,
                             result,
@@ -194,30 +229,53 @@ impl S {
                             "Inconclusive" => Verdict::Inconclusive,
                             other => return Err(format!("invalid verdict: {other}")),
                         };
-                        guard.conclude(Conclusion {
+                        Event::Conclude(Conclusion {
                             hypothesis_id,
                             verdict,
                             rationale,
                         })
                     }
-                    other => Err(format!("unknown variant: {other}")),
+                    other => return Err(format!("unknown variant: {other}")),
+                };
+
+                // Validate against the current log by applying to a clone, then
+                // persist durably, then commit in memory. An invalid event is
+                // rejected before anything is written.
+                let mut next = active.session.clone();
+                match &event {
+                    Event::AddHypothesis(h) => next.add_hypothesis(h.clone())?,
+                    Event::AddExperiment(e) => next.add_experiment(e.clone())?,
+                    Event::AddObservation(o) => next.add_observation(o.clone())?,
+                    Event::Conclude(c) => next.conclude(c.clone())?,
                 }
-                .map(|()| r#"{"status":"ok"}"#.to_string())
+                self.store.append(&active.session_id, &event)?;
+                active.session = next;
+                Ok(r#"{"status":"ok"}"#.to_string())
             }
             "state.get" => {
-                let guard = self.session.lock().map_err(|e| format!("lock: {e}"))?;
-                serde_json::to_string_pretty(&guard.standing()).map_err(|e| format!("json: {e}"))
+                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let active = guard
+                    .as_ref()
+                    .ok_or("no session open; call session.open first")?;
+                serde_json::to_string_pretty(&active.session.standing())
+                    .map_err(|e| format!("json: {e}"))
             }
             "experiment.next" => {
-                let guard = self.session.lock().map_err(|e| format!("lock: {e}"))?;
-                match guard.next_experiment() {
+                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let active = guard
+                    .as_ref()
+                    .ok_or("no session open; call session.open first")?;
+                match active.session.next_experiment() {
                     Some(h) => serde_json::to_string_pretty(&h).map_err(|e| format!("json: {e}")),
-                    None => Ok("null".to_string()),
+                    None => Ok(serde_json::json!({ "next": null }).to_string()),
                 }
             }
             "report.export" => {
-                let guard = self.session.lock().map_err(|e| format!("lock: {e}"))?;
-                serde_json::to_string_pretty(&guard.export_report())
+                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let active = guard
+                    .as_ref()
+                    .ok_or("no session open; call session.open first")?;
+                serde_json::to_string_pretty(&active.session.export_report())
                     .map_err(|e| format!("json: {e}"))
             }
             "adjudicate" => {
@@ -301,7 +359,7 @@ impl ServerHandler for S {
             "scientific-process: append-only scientific-process MCP server.\n\
             Standing is COMPUTED as a fold over the append-only event log — never stored.\n\n\
             Tools:\n\
-              session.open    – reset the session (start fresh)\n\
+              session.open    – open or resume a session by session_id (replays its log)\n\
               append          – append an event:\n\
                 variant add_hypothesis : id, statement\n\
                 variant add_experiment : id, hypothesis_id, design, prediction\n\
@@ -309,7 +367,8 @@ impl ServerHandler for S {
                 variant conclude       : hypothesis_id, verdict, rationale\n\
               state.get       – return the computed standing projection\n\
               experiment.next – return the highest-leverage open hypothesis (fewest observations), or null\n\
-              report.export   – return the structured report"
+              report.export   – return the structured report\n\
+              adjudicate      – stateless batch falsification adjudicator (does not touch the live session)"
                 .to_string(),
         );
         result
@@ -359,4 +418,159 @@ async fn main() -> anyhow::Result<()> {
     let svc = S::new().serve(stdio()).await?;
     svc.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_open_without_session_id_opens_the_default_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = S::with_state_dir(dir.path());
+        call(&server, "session.open", Value::Object(Default::default())).unwrap();
+        call(
+            &server,
+            "append",
+            serde_json::json!({"variant": "add_hypothesis", "id": "h1", "statement": "s"}),
+        )
+        .unwrap();
+        assert!(dir.path().join("default.jsonl").exists());
+    }
+
+    fn call(s: &S, name: &str, args: Value) -> Result<String, String> {
+        s.call_tool_impl(name, args)
+    }
+
+    #[test]
+    fn session_open_replays_appended_events_in_a_new_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = S::with_state_dir(dir.path());
+        call(
+            &first,
+            "session.open",
+            serde_json::json!({ "session_id": "s1" }),
+        )
+        .unwrap();
+        call(
+            &first,
+            "append",
+            serde_json::json!({
+                "variant": "add_hypothesis",
+                "id": "h1",
+                "statement": "water boils at 100C"
+            }),
+        )
+        .unwrap();
+
+        let second = S::with_state_dir(dir.path());
+        call(
+            &second,
+            "session.open",
+            serde_json::json!({ "session_id": "s1" }),
+        )
+        .unwrap();
+        let standing: Value = serde_json::from_str(
+            &call(&second, "state.get", Value::Object(Default::default())).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            standing["hypotheses"],
+            serde_json::json!([{
+                "id": "h1",
+                "statement": "water boils at 100C",
+                "status": "Open"
+            }])
+        );
+    }
+
+    #[test]
+    fn duplicate_append_leaves_log_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = S::with_state_dir(dir.path());
+        call(
+            &s,
+            "session.open",
+            serde_json::json!({ "session_id": "s1" }),
+        )
+        .unwrap();
+        call(
+            &s,
+            "append",
+            serde_json::json!({
+                "variant": "add_hypothesis",
+                "id": "h1",
+                "statement": "first"
+            }),
+        )
+        .unwrap();
+        let _ = call(
+            &s,
+            "append",
+            serde_json::json!({
+                "variant": "add_hypothesis",
+                "id": "h1",
+                "statement": "second"
+            }),
+        );
+
+        let log = std::fs::read_to_string(dir.path().join("s1.jsonl")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+    }
+
+    #[test]
+    fn unknown_reference_append_leaves_log_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = S::with_state_dir(dir.path());
+        call(
+            &s,
+            "session.open",
+            serde_json::json!({ "session_id": "s1" }),
+        )
+        .unwrap();
+        let _ = call(
+            &s,
+            "append",
+            serde_json::json!({
+                "variant": "add_experiment",
+                "id": "e1",
+                "hypothesis_id": "missing",
+                "design": "d",
+                "prediction": "p"
+            }),
+        );
+
+        assert!(!dir.path().join("s1.jsonl").exists());
+    }
+
+    #[test]
+    fn experiment_next_without_open_hypothesis_reports_null_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = S::with_state_dir(dir.path());
+        call(
+            &s,
+            "session.open",
+            serde_json::json!({ "session_id": "s1" }),
+        )
+        .unwrap();
+
+        let out: Value = serde_json::from_str(
+            &call(&s, "experiment.next", Value::Object(Default::default())).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(out, serde_json::json!({ "next": null }));
+    }
+
+    #[test]
+    fn server_instructions_mention_adjudicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let instructions = S::with_state_dir(dir.path())
+            .get_info()
+            .instructions
+            .unwrap();
+
+        assert!(instructions.contains("adjudicate"));
+    }
 }

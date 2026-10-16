@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod store;
+
 // ── error strings ───────────────────────────────────────────────────
 
 pub const ERR_DUPLICATE_ID: &str = "DUPLICATE_ID";
@@ -57,7 +59,7 @@ pub struct Conclusion {
 
 // ── events (append-only log) ────────────────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Event {
     AddHypothesis(Hypothesis),
     AddExperiment(Experiment),
@@ -67,6 +69,7 @@ pub enum Event {
 
 // ── session ─────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug)]
 pub struct Session {
     events: Vec<Event>,
 }
@@ -80,6 +83,16 @@ impl Default for Session {
 impl Session {
     pub fn new() -> Self {
         Self { events: Vec::new() }
+    }
+
+    /// Rebuild a session from a replayed append-only event log.
+    pub fn from_events(events: Vec<Event>) -> Self {
+        Self { events }
+    }
+
+    /// The append-only event log backing this session.
+    pub fn events(&self) -> &[Event] {
+        &self.events
     }
 
     // ── mutation (append-only, validated) ────────────────────────
