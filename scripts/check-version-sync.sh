@@ -26,7 +26,8 @@ done
 
 cargo_toml="${1:-$root/Cargo.toml}"; [ "$#" -gt 0 ] && shift
 server_json="${1:-$root/server.json}"; [ "$#" -gt 0 ] && shift
-npm_package_json="${1:-$root/npm/package.json}"
+# The launcher manifest defaults to npm/ beside the Cargo.toml being checked.
+npm_package_json="${1:-$(dirname "$cargo_toml")/npm/package.json}"
 
 # First `version = "..."` inside the [package] table.
 cargo_version="$(awk '

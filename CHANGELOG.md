@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `deny.toml` and a `cargo-deny` CI job; clippy is now required to pass with
     `-D warnings`.
   - `docs/releasing.md`, the maintainer release runbook.
+- CLI, agent skills and npm launcher, matching the praxec standard:
+  - `scientific-process --version`, `--help` and
+    `skills install|uninstall|list --target claude|codex|both (--dir <path>|--user)`,
+    with no arguments still serving MCP on stdio.
+  - Embedded `skills/` (three skills: `scientific-process`, `sp-investigate`,
+    `sp-adjudicate`) installed with a manifest beside the skills that refuses
+    to overwrite a modified or foreign skill.
+  - `@matthew-cochran/scientific-process` npm launcher that downloads the
+    release binary matching its version, verifies `checksums.sha256`, caches
+    it and execs it with stdio passed through.
 
 ### Changed
 

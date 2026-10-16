@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use rmcp::model::*;
@@ -410,10 +411,101 @@ impl ServerHandler for S {
     }
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
+// ─── Entry point + CLI ────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const USAGE: &str = "\
+scientific-process: append-only scientific-process MCP server.
+
+Usage:
+  scientific-process                 Run the MCP server on stdio (how MCP clients start it)
+  scientific-process skills <cmd>    Install, uninstall or list the agent skills
+  scientific-process --version       Print the version
+  scientific-process --help          Print this help
+";
+
+/// `scientific-process <version>`, the line `--version` prints.
+fn version_line() -> String {
+    format!("scientific-process {VERSION}")
+}
+
+/// The command line, after UTF-8 validation, before any IO.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Server,
+    Version,
+    Help,
+    Skills(Vec<String>),
+    Usage(String),
+}
+
+fn parse_command(args: &[String]) -> Command {
+    if args.is_empty() {
+        return Command::Server;
+    }
+    match args[0].as_str() {
+        "--version" | "-V" if args.len() == 1 => Command::Version,
+        "--help" | "-h" | "help" if args.len() == 1 => Command::Help,
+        "skills" => Command::Skills(args[1..].to_vec()),
+        _ => Command::Usage(args.join(" ")),
+    }
+}
+
+fn main() -> ExitCode {
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // No arguments: the MCP stdio server, exactly as every MCP client runs it.
+    // Nothing else may reach stdout in this mode.
+    if raw.is_empty() {
+        return run_server();
+    }
+    let Some(args) = raw
+        .into_iter()
+        .map(|a| a.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("scientific-process: arguments must be valid UTF-8");
+        return ExitCode::from(scientific_process::skills::EXIT_USAGE);
+    };
+    match parse_command(&args) {
+        Command::Server => run_server(),
+        Command::Version => {
+            println!("{}", version_line());
+            ExitCode::SUCCESS
+        }
+        Command::Help => {
+            print!("{USAGE}\n{}", scientific_process::skills::USAGE);
+            ExitCode::SUCCESS
+        }
+        Command::Skills(rest) => ExitCode::from(scientific_process::skills::run(&rest)),
+        Command::Usage(joined) => {
+            eprintln!("scientific-process: unexpected arguments `{joined}`\n\n{USAGE}");
+            ExitCode::from(scientific_process::skills::EXIT_USAGE)
+        }
+    }
+}
+
+fn run_server() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("Error: cannot start the async runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(serve()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
     eprintln!("scientific-process: serving on stdio");
     let svc = S::new().serve(stdio()).await?;
     svc.waiting().await?;
@@ -572,5 +664,32 @@ mod tests {
             .unwrap();
 
         assert!(instructions.contains("adjudicate"));
+    }
+
+    #[test]
+    fn version_line_names_the_binary_and_package_version() {
+        assert_eq!(version_line(), "scientific-process 0.1.0");
+    }
+
+    #[test]
+    fn no_arguments_selects_the_server_command() {
+        assert_eq!(parse_command(&[]), Command::Server);
+    }
+
+    #[test]
+    fn version_flag_selects_the_version_command() {
+        assert_eq!(parse_command(&["--version".to_string()]), Command::Version);
+    }
+
+    #[test]
+    fn skills_subcommand_forwards_its_arguments() {
+        let args = ["skills", "install", "--target", "claude"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_command(&args),
+            Command::Skills(vec!["install".into(), "--target".into(), "claude".into()])
+        );
     }
 }
