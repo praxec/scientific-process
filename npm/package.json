@@ -1,0 +1,48 @@
+{
+  "name": "@matthew-cochran/scientific-process",
+  "version": "0.2.0",
+  "description": "npx launcher for the scientific-process MCP server: downloads the verified release binary for your platform and runs it over stdio.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "scientific-process",
+    "hypothesis",
+    "experiment",
+    "scientific-method"
+  ],
+  "license": "Apache-2.0",
+  "author": "Matthew Cochran <matthew@cochranweb.com>",
+  "homepage": "https://github.com/praxec/scientific-process#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/praxec/scientific-process.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/praxec/scientific-process/issues"
+  },
+  "bin": {
+    "scientific-process": "bin/scientific-process.js"
+  },
+  "files": [
+    "bin/scientific-process.js",
+    "lib/install.js",
+    "lib/postinstall.js",
+    "lib/sync-skills.js",
+    "skills/",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "postinstall": "node lib/postinstall.js",
+    "prepack": "node lib/sync-skills.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
