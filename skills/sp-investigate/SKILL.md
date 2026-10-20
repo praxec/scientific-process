@@ -5,6 +5,9 @@ description: Use when debugging a failure, explaining a performance problem, or 
 
 # sp-investigate: run the loop
 
+Calling the tools: see [Calling the tools](../scientific-process/SKILL.md#calling-the-tools)
+(registered MCP server or a host wrapper such as `junior tools call`).
+
 Investigate by the scientific method. State a hypothesis, design the smallest
 experiment that could refute it, record the observation, and only then conclude.
 Each step is one bounded experiment, not a sweep of the codebase.

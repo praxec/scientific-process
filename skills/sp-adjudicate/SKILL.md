@@ -5,6 +5,9 @@ description: Use when a batch of independent claims, use cases or design checks 
 
 # sp-adjudicate: batch falsification
 
+Calling the tools: see [Calling the tools](../scientific-process/SKILL.md#calling-the-tools)
+(registered MCP server or a host wrapper such as `junior tools call`).
+
 `adjudicate` is a stateless batch falsifier. It does not touch the live session.
 Each case is one claim; you supply the observation, the tool computes the verdict.
 
