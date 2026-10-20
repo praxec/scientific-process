@@ -89,6 +89,7 @@ impl S {
                 serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "session_id": {"type": "string"},
                         "variant": {
                             "type": "string",
                             "enum": ["add_hypothesis", "add_experiment", "add_observation", "conclude"]
@@ -115,20 +116,33 @@ impl S {
                 "state.get",
                 "Return the computed standing: all hypotheses (with derived status), \
                 experiments, and observations. Standing is a pure fold over the \
-                append-only event log.",
-                serde_json::json!({ "type": "object", "properties": {} }),
+                append-only event log. With session_id, replay/switch to that session \
+                for this call; omitted, use the active session.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "session_id": {"type": "string"} }
+                }),
             ),
             Self::make_tool(
                 "experiment.next",
                 "Return the highest-leverage open hypothesis (the one with the fewest \
-                observations), or null if no open hypothesis remains.",
-                serde_json::json!({ "type": "object", "properties": {} }),
+                observations), or null if no open hypothesis remains. With session_id, \
+                replay/switch to that session for this call; omitted, use the active \
+                session.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "session_id": {"type": "string"} }
+                }),
             ),
             Self::make_tool(
                 "report.export",
                 "Export a structured report: each hypothesis with its experiments, \
-                observations, and verdict.",
-                serde_json::json!({ "type": "object", "properties": {} }),
+                observations, and verdict. With session_id, replay/switch to that session \
+                for this call; omitted, use the active session.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "session_id": {"type": "string"} }
+                }),
             ),
             Self::make_tool(
                 "adjudicate",
@@ -226,6 +240,50 @@ impl S {
         ]
     }
 
+    /// Replay `session_id` from the store and install it as the active session —
+    /// the single code path shared by `session.open` and per-call `session_id`.
+    /// The caller holds the `active` lock.
+    fn install_replayed_session(
+        active: &mut Option<ActiveSession>,
+        store: &FilesystemStore,
+        session_id: &str,
+    ) -> Result<(), String> {
+        store::validate_session_id(session_id)?;
+        let events = store.replay(session_id)?;
+        let session = Session::from_events(events);
+        *active = Some(ActiveSession {
+            session_id: session_id.to_string(),
+            session,
+        });
+        Ok(())
+    }
+
+    /// Resolve the session for one tool call. An explicit top-level `session_id`
+    /// opens/replays that session (and makes it active) when it differs from the
+    /// active one; omitted, it uses the active session and errors when none is
+    /// open.
+    fn session_guard_for_call(
+        &self,
+        args: &Value,
+    ) -> Result<std::sync::MutexGuard<'_, Option<ActiveSession>>, String> {
+        let mut guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+        match args.get("session_id").and_then(Value::as_str) {
+            Some(session_id) => {
+                let already_active = guard.as_ref().is_some_and(|a| a.session_id == session_id);
+                if !already_active {
+                    Self::install_replayed_session(&mut guard, &self.store, session_id)?;
+                }
+                Ok(guard)
+            }
+            None => {
+                if guard.is_none() {
+                    return Err("no session open; call session.open first".to_string());
+                }
+                Ok(guard)
+            }
+        }
+    }
+
     fn call_tool_impl(&self, name: &str, args: Value) -> Result<String, String> {
         match name {
             "session.open" => {
@@ -233,14 +291,8 @@ impl S {
                     .as_str()
                     .unwrap_or(DEFAULT_SESSION_ID)
                     .to_string();
-                store::validate_session_id(&session_id)?;
-                let events = self.store.replay(&session_id)?;
-                let session = Session::from_events(events);
                 let mut guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
-                *guard = Some(ActiveSession {
-                    session_id,
-                    session,
-                });
+                Self::install_replayed_session(&mut guard, &self.store, &session_id)?;
                 Ok(r#"{"status":"ok","message":"session opened"}"#.to_string())
             }
             "append" => {
@@ -257,7 +309,7 @@ impl S {
                 let verdict = args["verdict"].as_str().map(str::to_string);
                 let rationale = args["rationale"].as_str().map(str::to_string);
 
-                let mut guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let mut guard = self.session_guard_for_call(&args)?;
                 let active = guard
                     .as_mut()
                     .ok_or("no session open; call session.open first")?;
@@ -332,7 +384,7 @@ impl S {
                 Ok(r#"{"status":"ok"}"#.to_string())
             }
             "state.get" => {
-                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let guard = self.session_guard_for_call(&args)?;
                 let active = guard
                     .as_ref()
                     .ok_or("no session open; call session.open first")?;
@@ -340,7 +392,7 @@ impl S {
                     .map_err(|e| format!("json: {e}"))
             }
             "experiment.next" => {
-                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let guard = self.session_guard_for_call(&args)?;
                 let active = guard
                     .as_ref()
                     .ok_or("no session open; call session.open first")?;
@@ -350,7 +402,7 @@ impl S {
                 }
             }
             "report.export" => {
-                let guard = self.active.lock().map_err(|e| format!("lock: {e}"))?;
+                let guard = self.session_guard_for_call(&args)?;
                 let active = guard
                     .as_ref()
                     .ok_or("no session open; call session.open first")?;
@@ -817,6 +869,169 @@ mod tests {
         assert_eq!(
             parse_command(&args),
             Command::Skills(vec!["install".into(), "--target".into(), "claude".into()])
+        );
+    }
+
+    // ─ per-call session_id ──────────────────────────────────────
+
+    fn seed_hypothesis(dir: &std::path::Path, session_id: &str, hyp: &str) {
+        let s = S::with_state_dir(dir);
+        call(
+            &s,
+            "session.open",
+            serde_json::json!({ "session_id": session_id }),
+        )
+        .unwrap();
+        call(
+            &s,
+            "append",
+            serde_json::json!({ "variant": "add_hypothesis", "id": hyp, "statement": "s" }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn state_get_with_session_id_replays_a_session_on_a_fresh_server() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_hypothesis(dir.path(), "s1", "h1");
+        let fresh = S::with_state_dir(dir.path());
+
+        let standing: Value = serde_json::from_str(
+            &call(
+                &fresh,
+                "state.get",
+                serde_json::json!({ "session_id": "s1" }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(standing["hypotheses"][0]["id"], "h1");
+    }
+
+    #[test]
+    fn append_with_session_id_persists_on_a_fresh_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = S::with_state_dir(dir.path());
+        call(
+            &fresh,
+            "append",
+            serde_json::json!({
+                "session_id": "s1",
+                "variant": "add_hypothesis",
+                "id": "h1",
+                "statement": "s"
+            }),
+        )
+        .unwrap();
+
+        let observer = S::with_state_dir(dir.path());
+        let standing: Value = serde_json::from_str(
+            &call(
+                &observer,
+                "state.get",
+                serde_json::json!({ "session_id": "s1" }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(standing["hypotheses"][0]["id"], "h1");
+    }
+
+    #[test]
+    fn state_get_without_session_id_on_a_fresh_server_reports_no_session_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = S::with_state_dir(dir.path());
+
+        let err = call(&fresh, "state.get", Value::Object(Default::default())).unwrap_err();
+
+        assert_eq!(err, "no session open; call session.open first");
+    }
+
+    #[test]
+    fn append_without_session_id_on_a_fresh_server_reports_no_session_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = S::with_state_dir(dir.path());
+
+        let err = call(
+            &fresh,
+            "append",
+            serde_json::json!({ "variant": "add_hypothesis", "id": "h1", "statement": "s" }),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "no session open; call session.open first");
+    }
+
+    #[test]
+    fn per_call_session_id_becomes_the_active_session() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_hypothesis(dir.path(), "s1", "h1");
+        seed_hypothesis(dir.path(), "s2", "h2");
+        let s = S::with_state_dir(dir.path());
+        call(
+            &s,
+            "session.open",
+            serde_json::json!({ "session_id": "s1" }),
+        )
+        .unwrap();
+
+        call(&s, "state.get", serde_json::json!({ "session_id": "s2" })).unwrap();
+        let standing: Value = serde_json::from_str(
+            &call(&s, "state.get", Value::Object(Default::default())).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(standing["hypotheses"][0]["id"], "h2");
+    }
+
+    fn optional_session_id_schema(tool: &str) -> (Option<Value>, bool) {
+        let list = S::tool_list();
+        let t = list.iter().find(|t| t.name == tool).unwrap();
+        let prop = t
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("session_id"))
+            .cloned();
+        let required = t
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|r| r.iter().any(|v| v == "session_id"))
+            .unwrap_or(false);
+        (prop, required)
+    }
+
+    #[test]
+    fn tools_list_append_exposes_optional_session_id() {
+        assert_eq!(
+            optional_session_id_schema("append"),
+            (Some(serde_json::json!({ "type": "string" })), false)
+        );
+    }
+
+    #[test]
+    fn tools_list_state_get_exposes_optional_session_id() {
+        assert_eq!(
+            optional_session_id_schema("state.get"),
+            (Some(serde_json::json!({ "type": "string" })), false)
+        );
+    }
+
+    #[test]
+    fn tools_list_experiment_next_exposes_optional_session_id() {
+        assert_eq!(
+            optional_session_id_schema("experiment.next"),
+            (Some(serde_json::json!({ "type": "string" })), false)
+        );
+    }
+
+    #[test]
+    fn tools_list_report_export_exposes_optional_session_id() {
+        assert_eq!(
+            optional_session_id_schema("report.export"),
+            (Some(serde_json::json!({ "type": "string" })), false)
         );
     }
 
