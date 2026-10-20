@@ -1,6 +1,6 @@
 ---
 name: scientific-process
-description: Use when the scientific-process MCP server is available and the user wants evidence-driven work recorded as hypotheses, experiments, observations and conclusions, or wants the computed standing and a structured report. Covers the session lifecycle and session_id with SCIENTIFIC_PROCESS_STATE_DIR, the append variants add_hypothesis/add_experiment/add_observation/conclude, state.get, experiment.next, report.export, and the stateless adjudicate batch falsifier.
+description: Use when evidence-driven work should be recorded as hypotheses, experiments, observations and conclusions, or when the user wants the computed standing and a structured report. Covers the session lifecycle and session_id with SCIENTIFIC_PROCESS_STATE_DIR, the append variants add_hypothesis/add_experiment/add_observation/conclude, state.get, experiment.next, report.export, and the stateless adjudicate batch falsifier.
 ---
 
 # scientific-process: hypothesis, experiment, observation, conclusion
@@ -31,6 +31,23 @@ Duplicate ids are rejected with `DUPLICATE_ID`; references to unknown ids with
 `HYPOTHESIS_NOT_FOUND` or `EXPERIMENT_NOT_FOUND`. A rejected event writes
 nothing: the log is validated before it is appended.
 
+## Calling the tools
+
+The tools are the same whichever way you reach them; the method names and
+arguments in this skill do not change.
+
+- **Registered MCP server.** When `scientific-process` is registered with your agent
+  host, call the tools directly (`state.get session_id=<id>` with its arguments).
+- **Through a host wrapper.** When the server is not registered, a wrapper can
+  spawn the binary per call. With Junior, `junior tools call scientific-process state.get session_id=<id>
+  key=value ...` takes inline arguments (values parse as JSON),
+  `echo '{"tool":"state.get","arguments":{"session_id":"<id>"}}' | junior tools call scientific-process -`
+  reads the request from stdin, and `junior tools call scientific-process request.json`
+  reads it from a file. Each call prints the bare result.
+
+Do not register a server just to follow this skill; use whichever route your
+host already has.
+
 ## Advisory assist tools (opt-in, never append)
 
 When `SCIENTIFIC_PROCESS_ASSIST` includes `jev` and a Jev key is configured
@@ -52,9 +69,12 @@ the core tools continue to work unchanged. Tune the timeout with
 
 ## Session lifecycle
 
-1. Call `session.open` with a `session_id` before any `append`. A new id starts
-   fresh; an existing id replays its JSONL log and resumes. If you omit
-   `session_id`, the server uses `default`.
+1. Call `session.open` with a `session_id` before any `append` if you want an
+   explicit session. A new id starts fresh; an existing id replays its JSONL log
+   and resumes. If you omit `session_id`, the server uses `default`.
+   Alternatively, `append`, `state.get`, `experiment.next` and `report.export`
+   accept an optional `session_id` that opens/replays that session for the call,
+   so per-call clients need no separate `session.open`.
 2. Append events with `append`. There is no edit or delete; correct a mistake by
    appending a new event (a later `conclude` overrides an earlier one).
 3. Read `state.get` for the standing and `experiment.next` for the next best
