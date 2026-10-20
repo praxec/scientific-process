@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
+### Added
+
+- `append`, `state.get`, `experiment.next` and `report.export` accept an
+  optional per-call `session_id`, so per-call clients need no separate
+  `session.open` (#12).
+
+### Changed
+
+- Agent skills trigger on evidence-driven work and document "Calling the
+  tools", including the per-call `session_id` (#11).
+
 ## [0.2.0] - 2026-10-16
 
 ### Added
