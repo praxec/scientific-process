@@ -1,6 +1,6 @@
 {
   "name": "@matthew-cochran/scientific-process",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "npx launcher for the scientific-process MCP server: downloads the verified release binary for your platform and runs it over stdio.",
   "keywords": [
     "mcp",
