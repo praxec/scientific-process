@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- crates.io package metadata (description, license, repository, authors, readme, keywords, categories), so the crate can be published to crates.io.
+
 ## [0.3.1] - 2026-10-22
 
 ### Security

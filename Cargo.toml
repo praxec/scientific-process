@@ -3,6 +3,13 @@ name = "scientific-process"
 version = "0.3.1"
 edition = "2024"
 rust-version = "1.85"
+description = "Append-only scientific-process MCP server: hypotheses, experiments, observations and conclusions, with standing computed as a fold over the event log."
+license = "Apache-2.0"
+repository = "https://github.com/praxec/scientific-process"
+authors = ["Matthew Cochran <matthew@cochranweb.com>"]
+readme = "README.md"
+keywords = ["mcp", "scientific-method", "hypothesis", "experiment", "falsification"]
+categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
 name = "scientific-process"
